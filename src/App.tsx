@@ -830,7 +830,7 @@ export default function App() {
       <AnimatePresence>
         {!aiOpen && (
           <motion.button
-            initial={{ scale: 0, shadow: "none" }}
+            initial={{ scale: 0, boxShadow: "none" }}
             animate={{ scale: 1 }}
             exit={{ scale: 0 }}
             whileHover={{ scale: 1.08 }}
