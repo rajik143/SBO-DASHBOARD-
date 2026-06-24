@@ -15,6 +15,13 @@ import { jsPDF } from "jspdf";
 import autoTable from "jspdf-autotable";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { GoogleGenAI } from "@google/genai";
+
+declare global {
+  interface Window {
+    GEMINI_API_KEY?: string;
+  }
+}
 
 // WhatsApp Custom Message launcher helper
 function getWhatsAppLink(phone: string, userName: string) {
@@ -323,10 +330,10 @@ export default function App() {
   const fetchData = async () => {
     try {
       setLoading(true);
-      const res = await fetch("/api/sbo-data");
+      const res = await fetch("https://sbo-database-default-rtdb.firebaseio.com/sbo_data.json");
       if (!res.ok) throw new Error("Database server communication failure.");
       const data = await res.json();
-      setSboData(data.sbo_data);
+      setSboData(data.sbo_data || data);
       setError(null);
     } catch (err: any) {
       setError(err.message || "Failed to establish network clearance.");
@@ -370,24 +377,87 @@ export default function App() {
     const payload = { message: userText, history, imageBase64 };
     setImageBase64(null);
 
+    const apiKey = window.GEMINI_API_KEY || "";
+    if (!apiKey) {
+      setAiMessages(prev => [...prev, {
+        id: (Date.now() + 1).toString(),
+        role: "model" as const,
+        text: "Vanakkam! Ennala ipo full interactive service thara mudiyala, yenna API key configuration set panna padala. (Please paste your Gemini API Key in index.html to run standalone)."
+      }]);
+      setAiTyping(false);
+      return;
+    }
+
     try {
-      const response = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload)
-      });
-      const data = await response.json();
+      const cleanData = JSON.stringify(sboData);
+      const systemInstruction = `You are the SBO Assistant, a helpful and smart database concierge for SBO (School of Business Organization) administrators.
+You have absolute access to the SBO staff database provided below in JSON format.
+Your job is to answer the administrator's queries about staff, wallets, tasks, approvals, nominees, and balances accurately and in a friendly, conversational manner.
+You should support English, Tamil, and Tamil-English (Tanglish) naturally!
+
+SBO STAFF DATABASE:
+${cleanData}
+
+When answering queries:
+- Be neat and structure with bullet points or simple tables if showing list data.
+- Maintain administrator privacy but give direct, precise, non-evasive data answers.
+- Speak professionally but allow local Tamil/Tanglish phrases to make the interface extremely native, warm, and engaging.
+- If the user asks for help or general actions, guide them through.
+`;
+      const ai = new GoogleGenAI({ apiKey });
+
+      const geminiContents = [
+        ...(history || []).map((msg: any) => ({
+          role: msg.role === "model" ? "model" : "user",
+          parts: [{ text: msg.text }]
+        })),
+        { role: "user", parts: [{ text: userText }] }
+      ];
+
+      // Add image data if it exists
+      if (payload.imageBase64) {
+        const mimeType = payload.imageBase64.split(";")[0].split(":")[1];
+        const base64Data = payload.imageBase64.split(",")[1];
+        geminiContents[geminiContents.length - 1].parts.push({
+          inlineData: { data: base64Data, mimeType }
+        } as any);
+      }
       
+      const makeFetchRequest = async (model: string) => {
+        const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: geminiContents,
+            systemInstruction: { parts: [{ text: systemInstruction }] }
+          })
+        });
+        if (!resp.ok) {
+          if (resp.status === 404) return null; // Model not found
+          const errText = await resp.text();
+          throw new Error(`Gemini API failed (${model}): ${errText}`);
+        }
+        return resp.json();
+      };
+  
+      let responseData = await makeFetchRequest("gemini-3.1-flash-lite");
+      if (!responseData) {
+        responseData = await makeFetchRequest("gemini-2.5-flash");
+        if (!responseData) throw new Error("Fallback model gemini-2.5-flash also not found.");
+      }
+
+      const replyText = responseData.candidates?.[0]?.content?.parts?.[0]?.text || "No response received.";
+
       if (isAudioEnabled && 'speechSynthesis' in window) {
         window.speechSynthesis.cancel();
-        const utterance = new SpeechSynthesisUtterance(data.reply || "Error occurred.");
+        const utterance = new SpeechSynthesisUtterance(replyText || "Error occurred.");
         window.speechSynthesis.speak(utterance);
       }
 
       setAiMessages(prev => [...prev, {
         id: (Date.now() + 1).toString(),
         role: "model" as const,
-        text: data.reply || "Bathil kedaikala, system error. Please try again."
+        text: replyText || "Bathil kedaikala, system error. Please try again."
       }]);
     } catch {
       setAiMessages(prev => [...prev, {
